@@ -3,7 +3,7 @@ export SYSROOT="$BUTTER_DIR/sysroot"
 export GNU_EFI="$BUTTER_DIR/gnu-efi"
 export CFLAGS="-ffreestanding -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol -c"
 export LFLAGS='-nostdlib'
-PROJECTS="kernel"
+PROJECTS="boot kernel"
 
 mkdir $SYSROOT &> /dev/null
 
