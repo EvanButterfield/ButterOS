@@ -56,12 +56,11 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 			&MemoryMapSize,
 			MemoryMap, &MapKey,
 			&DescriptorSize, &DescriptorVersion);
-	if(EFI_ERROR(Status)) {
+	if(Status == EFI_BUFFER_TOO_SMALL) {
 		PRINT(L"Failed to get memory map.\r\n");
 		gBS->FreePool(MemoryMap);
 		return(Status);
 	}
-	PRINT(L"Successfully received memory map.\r\n");
 
 	while((Status = ST->ConIn->ReadKeyStroke(ST->ConIn, &Key)) == EFI_NOT_READY);
 	ST->RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, 0);
