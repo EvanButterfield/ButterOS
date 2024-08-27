@@ -9,19 +9,6 @@ UINT32 DescriptorVersion;
 
 #define PRINT(String) ST->ConOut->OutputString(ST->ConOut, (String))
 
-VOID *BootAllocatePool(UINTN Size) {
-	EFI_STATUS Status;
-	VOID *Result;
-
-	Status = gBS->AllocatePool(EfiLoaderData, Size, &Result);
-	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to allocate pool.\r\n");
-		return(0);
-	}
-
-	return(Result);
-}
-
 EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	EFI_STATUS Status;
 	EFI_INPUT_KEY Key;
@@ -53,7 +40,11 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	}
 
 	MemoryMapSize += 2 * DescriptorSize;
-	MemoryMap = BootAllocatePool(MemoryMapSize);
+	Status = gBS->AllocatePool(EfiLoaderData, MemoryMapSize, (VOID**)&MemoryMap);
+	if(EFI_ERROR(Status)) {
+		PRINT(L"Failed to allocate memory map.\r\n");
+		return(Status);
+	}
 
 	Status = gBS->GetMemoryMap(
 			&MemoryMapSize,
