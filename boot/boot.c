@@ -29,9 +29,12 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	ST = SystemTable;
 	gBS = ST->BootServices;
 
-	Status = ST->ConOut->ClearScreen(ST->ConOut);
-	if(EFI_ERROR(Status)) {
-		return(Status);
+	UINTN ClearScreen = FALSE;
+	if(ClearScreen) {
+		Status = ST->ConOut->ClearScreen(ST->ConOut);
+		if(EFI_ERROR(Status)) {
+			return(Status);
+		}
 	}
 
 	Status = ST->ConIn->Reset(ST->ConIn, FALSE);
@@ -39,7 +42,7 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		return(Status);
 	}
 
-	// -----Memory Map-----
+	// -----Exit Boot Services-----
 	Status = gBS->GetMemoryMap(
 			&MemoryMapSize,
 			MemoryMap, &MapKey,
@@ -58,12 +61,17 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 			&DescriptorSize, &DescriptorVersion);
 	if(EFI_ERROR(Status)) {
 		PRINT(L"Failed to get memory map.\r\n");
-		gBS->FreePool(MemoryMap);
 		return(Status);
 	}
-	PRINT(L"Successfully received memory map.\r\n");
 
-	while((Status = ST->ConIn->ReadKeyStroke(ST->ConIn, &Key)) == EFI_NOT_READY);
+	Status = gBS->ExitBootServices(ImageHandle, MapKey);
+	if(EFI_ERROR(Status)) {
+		PRINT(L"Failed to exit boot services.\r\n");
+		return(Status);
+	}
+	// ----/Exit Boot Services/----
+
+	for(;;);
 	ST->RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, 0);
 	return(Status);
 }
