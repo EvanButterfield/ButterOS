@@ -1,11 +1,10 @@
 #include <efi.h>
 #include <efilib.h>
 
-UINTN MemoryMapSize = 0;
-EFI_MEMORY_DESCRIPTOR *MemoryMap = 0;
-UINTN MapKey;
-UINTN DescriptorSize;
-UINT32 DescriptorVersion;
+#include <kernel/vga.h>
+
+static butter_memory_map MemoryMap;
+static butter_frame_buffer FrameBuffer;
 
 #define PRINT(String) ST->ConOut->OutputString(ST->ConOut, (String))
 
@@ -29,40 +28,75 @@ EFI_STATUS EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		return(Status);
 	}
 
+	// -----Get FrameBuffer-----
+	EFI_GUID GOutGUID = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+	EFI_GRAPHICS_OUTPUT_PROTOCOL *GOutProtocol;
+	Status = gBS->LocateProtocol(&GOutGUID, 0, (VOID**)&GOutProtocol);
+	if(EFI_ERROR(Status)) {
+		PRINT(L"Failed to get graphics output protocol.\r\n");
+		return(Status);
+	}
+
+	GOutProtocol->SetMode(GOutProtocol, 0);
+	FrameBuffer.BytesPerPixel = 8;
+
+	FrameBuffer.Base = GOutProtocol->Mode->FrameBufferBase;
+	FrameBuffer.Size = GOutProtocol->Mode->FrameBufferSize;
+	FrameBuffer.HorizontalResolution = GOutProtocol->Mode->Info->HorizontalResolution;
+	FrameBuffer.VerticalResolution = GOutProtocol->Mode->Info->VerticalResolution;
+	FrameBuffer.PixelsPerScanLine = GOutProtocol->Mode->Info->PixelsPerScanLine;
+
+	// ----/Get FrameBuffer/----
+	
 	// -----Exit Boot Services-----
 	Status = gBS->GetMemoryMap(
-			&MemoryMapSize,
-			MemoryMap, &MapKey,
-			&DescriptorSize, &DescriptorVersion);
+			&MemoryMap.Size,
+			MemoryMap.Map, &MemoryMap.Key,
+			&MemoryMap.DescriptorSize, &MemoryMap.DescriptorVersion);
 	if(Status != EFI_BUFFER_TOO_SMALL) {
 		PRINT(L"Memory map invalid parameter(s).\r\n");
 		return(Status);
 	}
 
-	MemoryMapSize += 2 * DescriptorSize;
-	Status = gBS->AllocatePool(EfiLoaderData, MemoryMapSize, (VOID**)&MemoryMap);
+	MemoryMap.Size += 2 * MemoryMap.DescriptorSize;
+	Status = gBS->AllocatePool(EfiLoaderData, MemoryMap.Size, (VOID**)&MemoryMap.Map);
 	if(EFI_ERROR(Status)) {
 		PRINT(L"Failed to allocate memory map.\r\n");
 		return(Status);
 	}
 
 	Status = gBS->GetMemoryMap(
-			&MemoryMapSize,
-			MemoryMap, &MapKey,
-			&DescriptorSize, &DescriptorVersion);
+			&MemoryMap.Size,
+			MemoryMap.Map, &MemoryMap.Key,
+			&MemoryMap.DescriptorSize, &MemoryMap.DescriptorVersion);
 	if(EFI_ERROR(Status)) {
 		PRINT(L"Failed to get memory map.\r\n");
 		return(Status);
 	}
 
-	Status = gBS->ExitBootServices(ImageHandle, MapKey);
+	Status = gBS->ExitBootServices(ImageHandle, MemoryMap.Key);
 	if(EFI_ERROR(Status)) {
 		PRINT(L"Failed to exit boot services.\r\n");
 		return(Status);
 	}
 	// ----/Exit Boot Services/----
 
-	for(;;);
+	UINT32 XOffset = 0;
+	UINT32 YOffset = 0;
+	for(;;) {
+		++XOffset;
+		++YOffset;
+		UINT32 *Row = (UINT32*)FrameBuffer.Base;
+		for(UINT32 Y = 0; Y < FrameBuffer.VerticalResolution; ++Y) {
+			UINT32 *Pixel = Row;
+			for(UINT32 X = 0; X < FrameBuffer.HorizontalResolution; ++X) {
+				*Pixel++ = (XOffset << 24) | (YOffset << 16) | (0 << 8) | (0xFF);
+			}
+
+			Row += FrameBuffer.PixelsPerScanLine;
+		}
+	}
+
 	ST->RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, 0);
 	return(Status);
 }
