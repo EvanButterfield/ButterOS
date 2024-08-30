@@ -3,6 +3,13 @@
 
 #include <efi.h>
 
+typedef struct butter_memory_map {
+	UINTN Size;
+	EFI_MEMORY_DESCRIPTOR *Map;
+	UINTN Key;
+	UINTN DescriptorSize;
+	UINT32 DescriptorVersion;
+} butter_memory_map;
 
 typedef struct butter_frame_buffer {
 	UINT32 BytesPerPixel;

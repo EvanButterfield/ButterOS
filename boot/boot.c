@@ -1,6 +1,7 @@
 #include <efi.h>
 #include <efilib.h>
 
+#include <kernel/memory.h>
 #include <kernel/vga.h>
 
 static butter_memory_map MemoryMap;
