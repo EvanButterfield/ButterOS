@@ -2,3 +2,6 @@ sysroot/
 
 *.o
 *.EFI
+*.ELF
+*.swp
+*.*~
