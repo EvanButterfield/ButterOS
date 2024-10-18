@@ -1,7 +1,10 @@
 #include <kernel/vga.h>
+#include <kernel/memory.h>
 
-#define KERNEL_MAIN(Name) int Name(                               \
-				butter_memory_map *MemoryMap,     \
-				butter_frame_buffer *FrameBuffer, \
-				EFI_FILE_HANDLE *CurrentVolume)
-typedef KERNEL_MAIN(kernel_main);
+typedef struct butter_kernel_config {
+	butter_frame_buffer *FrameBuffer;
+	butter_memory_map *MemoryMap;
+	EFI_FILE *Root;
+} butter_kernel_config;
+
+typedef int (__attribute__((sysv_abi)) *kernel_main) (butter_kernel_config *Config);

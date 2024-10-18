@@ -3,7 +3,6 @@
 
 #include <efi.h>
 
-
 typedef struct butter_frame_buffer {
 	UINT32 BytesPerPixel;
 	UINTN Size;
