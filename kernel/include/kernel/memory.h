@@ -3,6 +3,8 @@
 
 #include <efi.h>
 
+#define EFI_PAGES_TO_SIZE(Pages) ((Pages) << EFI_PAGE_SHIFT)
+
 typedef struct butter_memory_map {
 	UINTN Size;
 	EFI_MEMORY_DESCRIPTOR *Map;

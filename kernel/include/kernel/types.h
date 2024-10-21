@@ -12,6 +12,7 @@ typedef INT16 s16;
 typedef INT32 s32;
 typedef INT64 s64;
 
-typedef s32 b32;
+typedef BOOLEAN b8;
+typedef s32     b32;
 
 #endif // BUTTER_KERNEL_TYPES

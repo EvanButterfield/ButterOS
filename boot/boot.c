@@ -12,7 +12,24 @@
 static butter_memory_map MemoryMap;
 static butter_frame_buffer FrameBuffer;
 
+UINT64 NextAllocPage;
+
 #define PRINT(String) ST->ConOut->OutputString(ST->ConOut, (String))
+
+CHAR16 *EfiIntToStr(UINT64 Value, UINT64 Base, CHAR16 *Buffer) {
+	UINT32 CharIndex = 30;
+	for(; Value && CharIndex; --CharIndex, Value /= Base) {
+		Buffer[CharIndex] = (L"0123456789abcdef")[Value % Base];
+	}
+
+	return(&Buffer[CharIndex + 1]);
+}
+
+void *EfiAllocPage() {
+	void *Page = (void*)NextAllocPage;
+	NextAllocPage += EFI_PAGE_SIZE;
+	return(Page);
+}
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	EFI_STATUS Status;
@@ -108,24 +125,19 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		return(Status);
 	}
 
-	UINTN KernelEXESize = (UINTN)KernelEXEInfo->Size;
 	Status = KernelEXE->Read(KernelEXE, &KernelEXEInfo->FileSize, KernelBuffer);
 	if(EFI_ERROR(Status)) {
 		PRINT(L"Error reading KernelEXE.\r\n");
 		return(Status);
 	}
 
+	gBS->FreePool(KernelEXEInfo);
+
 	Status = KernelEXE->Close(KernelEXE);
 	if(EFI_ERROR(Status)) {
 		PRINT(L"Error closing KernelEXE.\r\n");
 		return(Status);
 	}
-
-	/*CHAR8 *KernelChar = (CHAR8*)KernelBuffer;
-	for(UINT32 CharIndex = 0; CharIndex < KernelEXEInfo->FileSize/2; ++CharIndex) {
-		CHAR16 Chars[2] = {KernelChar[CharIndex], 0};
-		PRINT(Chars);
-	}*/
 
 	Status = ST->ConOut->SetCursorPosition(ST->ConOut, 0, 0);
 	if(EFI_ERROR(Status)) {
@@ -134,6 +146,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
 	EFI_PHYSICAL_ADDRESS KernelEntryAddress;
 	butter_elf_header *KernelHeader;
+	UINT64 LastKernelSegmentAddress;
+	UINT64 LastKernelSegmentSize;
 	{
 		butter_elf_header *Header = (butter_elf_header*)KernelBuffer;
 		if(
@@ -175,15 +189,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 				UINT64 FileSize = PHeader.FileSize;
 				UINT64 MemSize = PHeader.MemSize;
 				UINT64 PAddress = PHeader.PAddress;
-
-				if(PHeader.VAddress <= Header->Entry && Header->Entry < PHeader.VAddress + MemSize) {
-					CHAR16 IndexChar[2] = {(CHAR16)PHIndex + 48, 0};
-					PRINT(IndexChar);
-
-					UINT64 EntryOffset = Header->Entry - PHeader.VAddress + Offset;
-					// KernelEntryAddress = (EFI_PHYSICAL_ADDRESS)((UINT64)Header + EntryOffset);
-				}
-
+				LastKernelSegmentAddress = PAddress;
+				LastKernelSegmentSize = FileSize;
+				
 				UINT64 PageCount = EFI_SIZE_TO_PAGES(FileSize);
 				Status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, PageCount, (EFI_PHYSICAL_ADDRESS*)&PAddress);
 				if(EFI_ERROR(Status)) {
@@ -196,17 +204,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 					gBS->CopyMem((VOID*)PAddress, ProgramData, FileSize);
 				}
 
-				// The standard requires the segment to be 0 filled if the memory size is larger than the file size
-				UINT64 ZeroFillStart = PAddress + FileSize;
-				UINT64 ZeroFillCount = MemSize - FileSize;
-				if(ZeroFillCount > 0) {
-					// gBS->SetMem((VOID*)ZeroFillStart, ZeroFillCount, 0);
-				}
-
 				++SegmentsLoaded;
 			}
 		}
 	}
+
+	// gBS->FreePool(KernelBuffer);
 
 	Status = ST->ConOut->SetCursorPosition(ST->ConOut, 0, 0);
 	if(EFI_ERROR(Status)) {
@@ -239,6 +242,61 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		PRINT(L"Failed to get memory map.\r\n");
 		return(Status);
 	}
+
+#if BOOT_PRINT_MEMORY
+	PRINT(L"Conventional memory descriptors:\n\r");
+#endif
+
+	UINT64 DescriptorBase = (UINT64)MemoryMap.Map;
+	CHAR16 DescSizeBuffer[36] = {0};
+	DescSizeBuffer[31] = 'K';
+	DescSizeBuffer[32] = 'B';
+	DescSizeBuffer[33] = '\n';
+	DescSizeBuffer[34] = '\r';
+
+	UINT64 BestDescStart = 0;
+	UINT64 BestDescPages = 0;
+	UINT64 AllKB = 0;
+	for(UINTN MemoryIndex = 0; MemoryIndex < MemoryMap.Size; MemoryIndex += MemoryMap.DescriptorSize) {
+		EFI_MEMORY_DESCRIPTOR *Descriptor = (EFI_MEMORY_DESCRIPTOR*)(DescriptorBase + MemoryIndex);
+		if(Descriptor->Type != EfiConventionalMemory) {
+			continue;
+		}
+
+		if(Descriptor->NumberOfPages > BestDescPages) {
+			BestDescStart = Descriptor->PhysicalStart;
+			BestDescPages = Descriptor->NumberOfPages;
+		}
+
+		UINT64 SizeKB = EFI_PAGES_TO_SIZE(Descriptor->NumberOfPages) / 1024;
+		AllKB += SizeKB;
+
+#if BOOT_PRINT_MEMORY
+		CHAR16 *SizeKBStr = EfiIntToStr(SizeKB, 10, DescSizeBuffer);
+		PRINT(SizeKBStr);
+#endif
+	}
+	NextAllocPage = BestDescStart;
+
+#if BOOT_PRINT_MEMORY
+	{
+		CHAR16 *SizeKBStr = EfiIntToStr(AllKB, 10, DescSizeBuffer);
+		PRINT(L"\n\rAll conventional memory: ");
+		PRINT(SizeKBStr);
+
+		UINT64 BestKB = EFI_PAGES_TO_SIZE(BestDescPages) / 1024;
+		CHAR16 *BestKBStr = EfiIntToStr(BestKB, 10, DescSizeBuffer);
+		PRINT(L"\n\rBest allocation size: ");
+		PRINT(BestKBStr);
+
+		DescSizeBuffer[31] = 0;
+		CHAR16 *StartStr = EfiIntToStr(BestDescStart, 16, DescSizeBuffer);
+		PRINT(L"Best allocation start: 0x");
+		PRINT(StartStr);
+	}
+
+	for(;;);
+#endif
 
 	Status = gBS->ExitBootServices(ImageHandle, MemoryMap.Key);
 	if(EFI_ERROR(Status)) {
