@@ -6,67 +6,15 @@
 #include <kernel/memory.h>
 #include <kernel/vga.h>
 #include <kernel/elf.h>
-#include <kernel/functions.h>
 #include <kernel/main.h>
 #include <kernel/types.h>
+#include <kernel/gdt.h>
+#include <kernel/paging.h>
+
+#define INT_08 asm("int $0x8")
 
 static butter_memory_map MemoryMap;
 static butter_frame_buffer FrameBuffer;
-
-UINT64 NextAllocPage;
-UINT64 PagesLeft;
-
-typedef struct gdt_entry {
-	u16 Limit15_0;
-	u16 Base15_0;
-	u8 Base23_16;
-	u8 Access;
-	u8 LimitAndFlags;
-	u8 Base31_24;
-} gdt_entry;
-
-typedef struct gdt_entry_64 {
-	u16 Limit15_0;
-	u16 Base15_0;
-	u8 Base23_16;
-	u8 Access;
-	u8 LimitAndFlags;
-	u8 Base31_24;
-	u32 Base63_32;
-	u32 Reserved;
-} gdt_entry_64;
-
-typedef struct tss {
-	u32 Reserved0;
-	u64 RSP0;
-	u64 RSP1;
-	u64 RSP2;
-	u64 Reserved1;
-	u64 IST1;
-	u64 IST2;
-	u64 IST3;
-	u64 IST4;
-	u64 IST5;
-	u64 IST6;
-	u64 IST7;
-	u64 Reserved2;
-	u16 Reserved3;
-	u16 IOPB;
-} __attribute__((aligned(16))) tss;
-
-typedef struct gdt {
-	gdt_entry Null;
-	gdt_entry KernelCode;
-	gdt_entry KernelData;
-	gdt_entry UserCode;
-	gdt_entry UserData;
-	gdt_entry_64 TSS;
-} __attribute__((aligned(16))) gdt;
-
-typedef struct table_ptr {
-	u16 Limit;
-	u64 Base;
-} __attribute__((packed)) table_ptr;
 
 tss TSS = {0};
 
@@ -79,26 +27,24 @@ gdt GDT = {
 	{0x0000, 0, 0, 0x89, 0x00, 0, 0, 0} // TSS
 };
 
-extern void LoadGDT(table_ptr *GDTPtr);
+butter_kernel_config KernelConfig;
 
-#define STACK_SIZE (4096)
-__attribute__((aligned(16))) u8 KernelStack[STACK_SIZE];
+extern void LoadGDTAndPML4(mapping_table *MappingTable, table_ptr *GDTPtr);
+extern void EnableSCE(void);
+extern void SetStack(u64 StackTop, butter_kernel_config *Config, u64 KernelEntry);
+
+u64 KernelStack;
+u64 KernelStackTop;
 
 #define PRINT(String) ST->ConOut->OutputString(ST->ConOut, (String))
 
-CHAR16 *EfiIntToStr(UINT64 Value, UINT64 Base, CHAR16 *Buffer) {
+CHAR16 *EfiIntToStr(u64 Value, u64 Base, CHAR16 *Buffer) {
 	UINT32 CharIndex = 30;
 	for(; Value && CharIndex; --CharIndex, Value /= Base) {
 		Buffer[CharIndex] = (L"0123456789abcdef")[Value % Base];
 	}
 
 	return(&Buffer[CharIndex + 1]);
-}
-
-void *EfiAllocPage() {
-	void *Page = (void*)NextAllocPage;
-	NextAllocPage += EFI_PAGE_SIZE;
-	return(Page);
 }
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
@@ -108,9 +54,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	ST = SystemTable;
 	gBS = ST->BootServices;
 
-	PRINT(L"Hello, world!.\r\n");
+	PRINT(L"Hello, world!.\n\r");
 
-	UINTN ClearScreen = FALSE;
+	UINTN ClearScreen = TRUE;
 	if(ClearScreen) {
 		Status = ST->ConOut->ClearScreen(ST->ConOut);
 		if(EFI_ERROR(Status)) {
@@ -128,10 +74,36 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		return(Status);
 	}
 
+	KernelStackTop = (u64)(KernelStack + sizeof(KernelStack));
+
+	// -----Get FrameBuffer-----
+	EFI_GUID GOutGUID = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+	EFI_GRAPHICS_OUTPUT_PROTOCOL *GOutProtocol;
+	Status = gBS->LocateProtocol(&GOutGUID, 0, (VOID**)&GOutProtocol);
+	if(EFI_ERROR(Status)) {
+		PRINT(L"Failed to get graphics output protocol.\n\r");
+		return(Status);
+	}
+
+	GOutProtocol->SetMode(GOutProtocol, 0);
+	FrameBuffer.BytesPerPixel = 8;
+
+	FrameBuffer.Base = GOutProtocol->Mode->FrameBufferBase;
+	FrameBuffer.Size = GOutProtocol->Mode->FrameBufferSize;
+	FrameBuffer.HorizontalResolution = GOutProtocol->Mode->Info->HorizontalResolution;
+	FrameBuffer.VerticalResolution = GOutProtocol->Mode->Info->VerticalResolution;
+	FrameBuffer.PixelsPerScanLine = GOutProtocol->Mode->Info->PixelsPerScanLine;
+	// ----/Get FrameBuffer/----
+
 	EFI_LOADED_IMAGE *LoadedImage;
 	EFI_GUID LoadedImageProtocolGUID = EFI_LOADED_IMAGE_PROTOCOL_GUID;
 	gBS->HandleProtocol(ImageHandle, &LoadedImageProtocol, (void**)&LoadedImage);
 
+	table_ptr GDTPtr = {sizeof(GDT) - 1, (u64)&GDT};
+
+	PRINT(L"Welcome to ButterOS!\r\n");
+
+#if !BOOT_PRINT_MEMORY
 	{
 		CHAR16 ImageBaseBuffer[33] = {0};
 		ImageBaseBuffer[31] = '\n';
@@ -151,7 +123,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		PRINT(ImageBaseStr);
 	}
 
-	table_ptr GDTPtr = {sizeof(GDT) - 1, (u64)&GDT};
 	{
 		CHAR16 PtrBuffer[33] = {0};
 		PtrBuffer[31] = '\n';
@@ -169,30 +140,25 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		PtrBufferStr[1] = 'x';
 		PRINT(L"GDT Base: ");
 		PRINT(PtrBufferStr);
+
+		PtrBufferStr = EfiIntToStr((u64)&PML4, 16, PtrBuffer);
+		PtrBufferStr -= 2;
+		PtrBufferStr[0] = '0';
+		PtrBufferStr[1] = 'x';
+		PRINT(L"PML4 Base: ");
+		PRINT(PtrBufferStr);
 	}
+#endif
 
-	PRINT(L"\n\rPress any key to continue...\n\r");
-	EFI_INPUT_KEY InputKey;
-	while((Status = ST->ConIn->ReadKeyStroke(ST->ConIn, &InputKey)) == EFI_NOT_READY);
-
-	// -----Get FrameBuffer-----
-	EFI_GUID GOutGUID = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-	EFI_GRAPHICS_OUTPUT_PROTOCOL *GOutProtocol;
-	Status = gBS->LocateProtocol(&GOutGUID, 0, (VOID**)&GOutProtocol);
+	// -----Allocate Kernel Stack-----
+	Status = gBS->AllocatePages(AllocateAnyPages, EfiLoaderData, EFI_SIZE_TO_PAGES(STACK_SIZE), &KernelStack);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to get graphics output protocol.\r\n");
+		PRINT(L"Error allocating kernel stack.\n\r");
 		return(Status);
 	}
 
-	GOutProtocol->SetMode(GOutProtocol, 0);
-	FrameBuffer.BytesPerPixel = 8;
-
-	FrameBuffer.Base = GOutProtocol->Mode->FrameBufferBase;
-	FrameBuffer.Size = GOutProtocol->Mode->FrameBufferSize;
-	FrameBuffer.HorizontalResolution = GOutProtocol->Mode->Info->HorizontalResolution;
-	FrameBuffer.VerticalResolution = GOutProtocol->Mode->Info->VerticalResolution;
-	FrameBuffer.PixelsPerScanLine = GOutProtocol->Mode->Info->PixelsPerScanLine;
-	// ----/Get FrameBuffer/----
+	KernelStackTop = KernelStack + STACK_SIZE;
+	// ----/Allocate Kernel Stack/----
 	
 	// -----Load Kernel Image-----
 	EFI_GUID SimpleFileSystemProtocolGUID = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
@@ -205,7 +171,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	EFI_FILE *KernelEXE;
 	Status = Root->Open(Root, &KernelEXE, L"\\kernel\\kernel.exe", EFI_FILE_MODE_READ, 0);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to open kernel/kernel.exe.\r\n");
+		PRINT(L"Failed to open kernel/kernel.exe.\n\r");
 		return(Status);
 	}
 
@@ -213,33 +179,34 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	UINTN KernelEXEInfoSize = 0;
 	Status = KernelEXE->GetInfo(KernelEXE, &FileInfoGUID, &KernelEXEInfoSize, 0);
 	if(Status != EFI_BUFFER_TOO_SMALL) {
-		PRINT(L"Failed first GetInfo of kernel file.\r\n");
+		PRINT(L"Failed first GetInfo of kernel file.\n\r");
 		return(Status);
 	}
 
 	EFI_FILE_INFO *KernelEXEInfo;
 	Status = gBS->AllocatePool(EfiLoaderData, KernelEXEInfoSize, (VOID**)&KernelEXEInfo);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to allocate KernelEXEInfo.\r\n");
+		PRINT(L"Failed to allocate KernelEXEInfo.\n\r");
 		return(Status);
 	}
 
 	Status = KernelEXE->GetInfo(KernelEXE, &FileInfoGUID, &KernelEXEInfoSize, KernelEXEInfo);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to get info of kernel file.\r\n");
+		PRINT(L"Failed to get info of kernel file.\n\r");
 		return(Status);
 	}
 
 	VOID *KernelBuffer;
-	Status = gBS->AllocatePool(EfiLoaderData, KernelEXEInfo->FileSize, &KernelBuffer);
+	UINTN KernelBufferPages = (KernelEXEInfo->FileSize + (EFI_PAGE_SIZE - 1)) / EFI_PAGE_SIZE;
+	Status = gBS->AllocatePages(AllocateAnyPages, EfiLoaderData, KernelBufferPages, &KernelBuffer);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to allocate memory for kernel file.\r\n");
+		PRINT(L"Failed to allocate memory for kernel file.\n\r");
 		return(Status);
 	}
 
 	Status = KernelEXE->Read(KernelEXE, &KernelEXEInfo->FileSize, KernelBuffer);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Error reading KernelEXE.\r\n");
+		PRINT(L"Error reading KernelEXE.\n\r");
 		return(Status);
 	}
 
@@ -247,21 +214,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
 	Status = KernelEXE->Close(KernelEXE);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Error closing KernelEXE.\r\n");
+		PRINT(L"Error closing KernelEXE.\n\r");
 		return(Status);
 	}
 
-	Status = ST->ConOut->SetCursorPosition(ST->ConOut, 0, 0);
-	if(EFI_ERROR(Status)) {
-		return(Status);
-	}
-
-	EFI_PHYSICAL_ADDRESS KernelEntryAddress;
-	butter_elf_header *KernelHeader;
-	UINT64 LastKernelSegmentAddress;
-	UINT64 LastKernelSegmentSize;
+	elf_header *KernelHeader;
 	{
-		butter_elf_header *Header = (butter_elf_header*)KernelBuffer;
+		elf_header *Header = (elf_header*)KernelBuffer;
+		KernelHeader = Header;
 		if(
 				Header->Ident[0] != 0x7f ||
 				Header->Ident[1] != 'E'  ||
@@ -269,65 +229,96 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 				Header->Ident[3] != 'F'  ||
 				Header->Ident[4] != 2    ||
 				Header->Ident[5] != 1) {
-			PRINT(L"Incorrect kernel header.\r\n");
-			return(0);
+			PRINT(L"Incorrect kernel header.\n\r");
+			INT_08;
 		}
 
-		if(Header->Type == ET_REL) {
-			PRINT(L"REL kernel unsupported.\r\n");
-			return(0);
+		if(Header->Type != ET_EXEC) {
+			PRINT(L"Kernel isn't an EXEC ELF!\n\r");
+			INT_08;
 		}
 
 		if(Header->PHNum == 0) {
-			PRINT(L"No program segments in kernel image.\r\n");
-			return(0);
+			PRINT(L"No program segments in kernel image.\n\r");
+			INT_08;
 		}
 
 		if(Header->Entry == 0) {
-			PRINT(L"Kernel has no entry.\r\n");
-			return(0);
+			PRINT(L"Kernel has no entry.\n\r");
+			INT_08;
 		}
 
-		KernelHeader = Header;
+		u64 Base = UINTPTR_MAX;
 
-		KernelEntryAddress = (EFI_PHYSICAL_ADDRESS)((UINT64)KernelBuffer + Header->Entry);
+		elf_pheader *PHeader = ELFGetPHeader(Header);
+#define MIN(A, B) ((A) < (B) ? (A) : (B))
+#define MAX(A, B) ((A) > (B) ? (A) : (B))
+		for(u16 PHIndex = 0; PHIndex < Header->PHNum; ++PHIndex) {
+			elf_pheader *Program = &PHeader[PHIndex];
 
-		butter_elf_pheader *PHeaders = ELFGetPHeader(Header);
-		UINT32 SegmentsLoaded = 0;
-		for(UINT32 PHIndex = 0; PHIndex < Header->PHNum; ++PHIndex) {
-			butter_elf_pheader PHeader = PHeaders[PHIndex];
-			if(PHeader.Type == EPHT_LOAD) {
-				UINT64 Offset = PHeader.Offset;
-				UINT64 FileSize = PHeader.FileSize;
-				UINT64 MemSize = PHeader.MemSize;
-				UINT64 PAddress = PHeader.PAddress;
-				LastKernelSegmentAddress = PAddress;
-				LastKernelSegmentSize = FileSize;
-				
-				UINT64 PageCount = EFI_SIZE_TO_PAGES(FileSize);
-				Status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, PageCount, (EFI_PHYSICAL_ADDRESS*)&PAddress);
+			Base = MIN(Base, Program->VAddress);
+			continue;
+
+			if(Program->Type == EPHT_LOAD) {
+				u64 SizePages = EFI_SIZE_TO_PAGES(Program->MemSize);
+				u64 Memory = Program->PAddress;
+				Status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, SizePages, &Memory);
 				if(EFI_ERROR(Status)) {
-					PRINT(L"Error allocating memory for kernel program header.\r\n");
-					return(0);
+					PRINT(L"Error allocating pages for kernel program segment.\r\n");
+					INT_08;
 				}
 
-				if(FileSize > 0) {
-					VOID *ProgramData = (VOID*)((UINT64)Header + Offset);
-					gBS->CopyMem((VOID*)PAddress, ProgramData, FileSize);
+				if(Program->FileSize > 0) {
+					MemCopy((void*)Memory, (void*)((u64)KernelBuffer + Program->Offset), Program->FileSize);
 				}
-
-				++SegmentsLoaded;
 			}
 		}
+
+		u64 ProgramSize = 0;
+		for(u16 PHIndex = 0; PHIndex < Header->PHNum; ++PHIndex) {
+			elf_pheader *Program = &PHeader[PHIndex];
+			u64 SegmentEnd = Program->VAddress - Base + Program->MemSize;
+			ProgramSize = MAX(ProgramSize, SegmentEnd);
+		}
+
+		for(u16 PHIndex = 0; PHIndex < Header->PHNum; ++PHIndex) {
+			elf_pheader *Program = &PHeader[PHIndex];
+			void *Memory = (void*)(Base + Program->VAddress);
+			MemSet(Memory, 0, Program->MemSize);
+			MemCopy(Memory, KernelBuffer + Program->Offset, Program->FileSize);
+		}
 	}
 
-	// gBS->FreePool(KernelBuffer);
+	{
+		CHAR16 PtrBuffer[33] = {0};
+		PtrBuffer[31] = '\n';
+		PtrBuffer[32] = '\r';
+		CHAR16 *PtrStr = EfiIntToStr((u64)KernelBuffer, 16, PtrBuffer);
+		PtrStr -= 2;
+		PtrStr[0] = '0';
+		PtrStr[1] = 'x';
+		PRINT(L"Kernel Base: ");
+		PRINT(PtrStr);
 
-	Status = ST->ConOut->SetCursorPosition(ST->ConOut, 0, 0);
-	if(EFI_ERROR(Status)) {
-		return(Status);
+		PtrStr = EfiIntToStr((u64)KernelHeader->Entry, 16, PtrBuffer);
+		PtrStr -= 2;
+		PtrStr[0] = '0';
+		PtrStr[1] = 'x';
+		PRINT(L"Kernel Entry Base: ");
+		PRINT(PtrStr);
+
+		PtrStr = EfiIntToStr(KernelStackTop, 16, PtrBuffer);
+		PtrStr -= 2;
+		PtrStr[0] = '0';
+		PtrStr[1] = 'x';
+		PRINT(L"Kernel Stack Top: ");
+		PRINT(PtrStr);
 	}
 	// ----/Load Kernel Image/----
+
+	PRINT(L"\n\rPress any key to continue...\n\r");
+	EFI_INPUT_KEY InputKey;
+	while((Status = ST->ConIn->ReadKeyStroke(ST->ConIn, &InputKey)) == EFI_NOT_READY);
 
 	// -----Exit Boot Services-----
 	Status = gBS->GetMemoryMap(
@@ -335,14 +326,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 			MemoryMap.Map, &MemoryMap.Key,
 			&MemoryMap.DescriptorSize, &MemoryMap.DescriptorVersion);
 	if(Status != EFI_BUFFER_TOO_SMALL) {
-		PRINT(L"Memory map invalid parameter(s).\r\n");
+		PRINT(L"Memory map invalid parameter(s).\n\r");
 		return(Status);
 	}
 
 	MemoryMap.Size += 2 * MemoryMap.DescriptorSize;
 	Status = gBS->AllocatePool(EfiLoaderData, MemoryMap.Size, (VOID**)&MemoryMap.Map);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to allocate memory map.\r\n");
+		PRINT(L"Failed to allocate memory map.\n\r");
 		return(Status);
 	}
 
@@ -351,7 +342,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 			MemoryMap.Map, &MemoryMap.Key,
 			&MemoryMap.DescriptorSize, &MemoryMap.DescriptorVersion);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to get memory map.\r\n");
+		PRINT(L"Failed to get memory map.\n\r");
 		return(Status);
 	}
 
@@ -359,45 +350,54 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	PRINT(L"Conventional memory descriptors:\n\r");
 #endif
 
-	UINT64 DescriptorBase = (UINT64)MemoryMap.Map;
-	CHAR16 DescSizeBuffer[36] = {0};
-	DescSizeBuffer[31] = 'K';
-	DescSizeBuffer[32] = 'B';
-	DescSizeBuffer[33] = '\n';
-	DescSizeBuffer[34] = '\r';
-
-	UINT64 BestDescStart = 0;
-	UINT64 BestDescPages = 0;
-	UINT64 AllKB = 0;
-	for(UINTN MemoryIndex = 0; MemoryIndex < MemoryMap.Size; MemoryIndex += MemoryMap.DescriptorSize) {
-		EFI_MEMORY_DESCRIPTOR *Descriptor = (EFI_MEMORY_DESCRIPTOR*)(DescriptorBase + MemoryIndex);
-		if(Descriptor->Type != EfiConventionalMemory) {
-			continue;
-		}
-
-		if(Descriptor->NumberOfPages > BestDescPages) {
-			BestDescStart = Descriptor->PhysicalStart;
-			BestDescPages = Descriptor->NumberOfPages;
-		}
-
-		UINT64 SizeKB = EFI_PAGES_TO_SIZE(Descriptor->NumberOfPages) / 1024;
-		AllKB += SizeKB;
-
-#if BOOT_PRINT_MEMORY
-		CHAR16 *SizeKBStr = EfiIntToStr(SizeKB, 10, DescSizeBuffer);
-		PRINT(SizeKBStr);
-#endif
-	}
-	PagesLeft = BestDescPages;
-	NextAllocPage = BestDescStart;
-
-#if BOOT_PRINT_MEMORY
 	{
+		u64 DescriptorBase = (u64)MemoryMap.Map;
+		CHAR16 DescSizeBuffer[36] = {0};
+		DescSizeBuffer[31] = 'K';
+		DescSizeBuffer[32] = 'B';
+		DescSizeBuffer[33] = '\n';
+		DescSizeBuffer[34] = '\r';
+
+		u64 BestDescStart = 0;
+		u64 BestDescPages = 0;
+		u64 AllKB = 0;
+		for(UINTN MemoryIndex = 0; MemoryIndex < MemoryMap.Size; MemoryIndex += MemoryMap.DescriptorSize) {
+			EFI_MEMORY_DESCRIPTOR *Descriptor = (EFI_MEMORY_DESCRIPTOR*)(DescriptorBase + MemoryIndex);
+			if(Descriptor->Type != EfiConventionalMemory) {
+				continue;
+			}
+
+			if(Descriptor->NumberOfPages > BestDescPages) {
+				BestDescStart = Descriptor->PhysicalStart;
+				BestDescPages = Descriptor->NumberOfPages;
+			}
+
+			u64 SizeKB = EFI_PAGES_TO_SIZE(Descriptor->NumberOfPages) / 1024;
+			AllKB += SizeKB;
+
+#if BOOT_PRINT_MEMORY
+			u64 StartBuffer[34] = {0};
+			// StartBuffer[31] = ',';
+			// StartBuffer[32] = ' ';
+			CHAR16 *PhysStartStr = EfiIntToStr(Descriptor->PhysicalStart, 16, StartBuffer);
+			PRINT(PhysStartStr);
+			PhysStartStr -= 2;
+			PhysStartStr[0] = '0';
+			PhysStartStr[2] = 'x';
+
+			CHAR16 *SizeKBStr = EfiIntToStr(SizeKB, 10, DescSizeBuffer);
+			PRINT(SizeKBStr);
+#endif
+		}
+		PagesLeft = BestDescPages;
+		NextAllocPage = BestDescStart;
+
+#if BOOT_PRINT_MEMORY
 		CHAR16 *SizeKBStr = EfiIntToStr(AllKB, 10, DescSizeBuffer);
 		PRINT(L"\n\rAll conventional memory: ");
 		PRINT(SizeKBStr);
 
-		UINT64 BestKB = EFI_PAGES_TO_SIZE(BestDescPages) / 1024;
+		u64 BestKB = EFI_PAGES_TO_SIZE(BestDescPages) / 1024;
 		CHAR16 *BestKBStr = EfiIntToStr(BestKB, 10, DescSizeBuffer);
 		PRINT(L"\n\rBest allocation size: ");
 		PRINT(BestKBStr);
@@ -406,14 +406,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 		CHAR16 *StartStr = EfiIntToStr(BestDescStart, 16, DescSizeBuffer);
 		PRINT(L"Best allocation start: 0x");
 		PRINT(StartStr);
-	}
-
-	for(;;);
+		
+		for(;;);
 #endif
+	}
 
 	Status = gBS->ExitBootServices(ImageHandle, MemoryMap.Key);
 	if(EFI_ERROR(Status)) {
-		PRINT(L"Failed to exit boot services.\r\n");
+		PRINT(L"Failed to exit boot services.\n\r");
 		return(Status);
 	}
 	// ----/Exit Boot Services/----
@@ -427,19 +427,33 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	GDT.TSS.Limit15_0 = sizeof(TSS) - 1;
 
 	TSS.IOPB = sizeof(TSS);
-	TSS.RSP0 = (u64)(KernelStack + sizeof(KernelStack));
+	TSS.RSP0 = KernelStackTop;
 
-	LoadGDT(&GDTPtr);
+	u64 DescriptorBase = (u64)MemoryMap.Map;
+	for(UINTN MemoryIndex = 0; MemoryIndex < MemoryMap.Size; MemoryIndex += MemoryMap.DescriptorSize) {
+		EFI_MEMORY_DESCRIPTOR *Descriptor = (EFI_MEMORY_DESCRIPTOR*)(DescriptorBase + MemoryIndex);
+		u64 Page = Descriptor->PhysicalStart;
+		KMapPages(Page, Page, Descriptor->NumberOfPages, PAGE_IDENTITY);
+		for(u64 Page = Descriptor->PhysicalStart; Page < Descriptor->PhysicalStart + Descriptor->NumberOfPages * PAGE_SIZE; Page += PAGE_SIZE) {
+			KMapPages(Page, Page, 1, PAGE_IDENTITY);
+		}
+	}
+
+	for(u64 StackAddress = (u64)&KernelStack; StackAddress < (u64)&KernelStack + STACK_SIZE; StackAddress += 0x1000) {
+		KMapPages(StackAddress, StackAddress, 1, PAGE_IDENTITY);
+	}
+
+	// KMapPages(KernelHeader->Entry, KernelHeader->Entry, )
+
+	LoadGDTAndPML4(&PML4, &GDTPtr);
+	EnableSCE();
 	// ----/Load GDT/----
 
-	butter_kernel_config KernelConfig = {
-		&FrameBuffer,
-		&MemoryMap,
-		Root
-	};
+	KernelConfig.FrameBuffer = &FrameBuffer;
+	KernelConfig.MemoryMap = &MemoryMap;
+	KernelConfig.Root = Root;
 
-	kernel_main KernelMain = (kernel_main)KernelHeader->Entry;
-	int KernelStatus = KernelMain(&KernelConfig);
-	ST->RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, 0);
-	return(KernelStatus);
+	SetStack(KernelStackTop, &KernelConfig, KernelHeader->Entry);
+	// Should never reach here
+	return(0);
 }

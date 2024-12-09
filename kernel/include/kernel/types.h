@@ -1,18 +1,20 @@
 #ifndef BUTTER_KERNEL_TYPES
 #define BUTTER_KERNEL_TYPES
 
-typedef UINT8  u8;
-typedef UINT16 u16;
-typedef UINT32 u32;
-typedef UINT64 u64;
-typedef UINTN  un;
+#include <stdint.h>
 
-typedef INT8  s8;
-typedef INT16 s16;
-typedef INT32 s32;
-typedef INT64 s64;
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef UINTN    un;
 
-typedef BOOLEAN b8;
+typedef int8_t  s8;
+typedef int16_t s16;
+typedef int32_t s32;
+typedef int64_t s64;
+
+typedef s8      b8;
 typedef s32     b32;
 
 #endif // BUTTER_KERNEL_TYPES
