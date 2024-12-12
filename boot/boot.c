@@ -316,9 +316,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	}
 	// ----/Load Kernel Image/----
 
-	PRINT(L"\n\rPress any key to continue...\n\r");
+	/*PRINT(L"\n\rPress any key to continue...\n\r");
 	EFI_INPUT_KEY InputKey;
-	while((Status = ST->ConIn->ReadKeyStroke(ST->ConIn, &InputKey)) == EFI_NOT_READY);
+	while((Status = ST->ConIn->ReadKeyStroke(ST->ConIn, &InputKey)) == EFI_NOT_READY);*/
 
 	// -----Exit Boot Services-----
 	Status = gBS->GetMemoryMap(
@@ -452,6 +452,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	KernelConfig.FrameBuffer = &FrameBuffer;
 	KernelConfig.MemoryMap = &MemoryMap;
 	KernelConfig.Root = Root;
+	KernelConfig.NextAllocPage = NextAllocPage;
+	KernelConfig.PagesLeft = PagesLeft;
 
 	SetStack(KernelStackTop, &KernelConfig, KernelHeader->Entry);
 	// Should never reach here
