@@ -5,13 +5,13 @@
 
 #define EFI_PAGES_TO_SIZE(Pages) ((Pages) << EFI_PAGE_SHIFT)
 
-typedef struct butter_memory_map {
+typedef struct memory_map {
 	UINTN Size;
 	EFI_MEMORY_DESCRIPTOR *Map;
 	UINTN Key;
 	UINTN DescriptorSize;
 	UINT32 DescriptorVersion;
-} butter_memory_map;
+} memory_map;
 
 static void MemCopy(void *_Destination, void *_Source, UINTN Size) {
 	CHAR8 *Destination = (CHAR8*)_Destination;

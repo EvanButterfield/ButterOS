@@ -11,10 +11,8 @@
 #include <kernel/gdt.h>
 #include <kernel/paging.h>
 
-#define INT_08 asm("int $0x8")
-
-static butter_memory_map MemoryMap;
-static butter_frame_buffer FrameBuffer;
+static memory_map MemoryMap;
+static frame_buffer FrameBuffer;
 
 tss TSS = {0};
 
@@ -230,22 +228,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 				Header->Ident[4] != 2    ||
 				Header->Ident[5] != 1) {
 			PRINT(L"Incorrect kernel header.\n\r");
-			INT_08;
 		}
 
 		if(Header->Type != ET_EXEC) {
 			PRINT(L"Kernel isn't an EXEC ELF!\n\r");
-			INT_08;
 		}
 
 		if(Header->PHNum == 0) {
 			PRINT(L"No program segments in kernel image.\n\r");
-			INT_08;
 		}
 
 		if(Header->Entry == 0) {
 			PRINT(L"Kernel has no entry.\n\r");
-			INT_08;
 		}
 
 		u64 Base = UINTPTR_MAX;
@@ -265,7 +259,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 				Status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, SizePages, &Memory);
 				if(EFI_ERROR(Status)) {
 					PRINT(L"Error allocating pages for kernel program segment.\r\n");
-					INT_08;
+	
 				}
 
 				if(Program->FileSize > 0) {
@@ -454,6 +448,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 	KernelConfig.Root = Root;
 	KernelConfig.NextAllocPage = NextAllocPage;
 	KernelConfig.PagesLeft = PagesLeft;
+	KernelConfig.Stack = KernelStack;
 
 	SetStack(KernelStackTop, &KernelConfig, KernelHeader->Entry);
 	// Should never reach here
